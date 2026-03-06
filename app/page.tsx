@@ -1,14 +1,48 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback } from "react";
 
 const API_URL = "https://swarm-git-56261926654.europe-west1.run.app/v1/tasks";
+const MEMORY_API_BASE = "https://swarm-git-56261926654.europe-west1.run.app/v1/memory";
 
-interface FileEntry {
+interface MemoryNode {
   name: string;
   kind: "file" | "directory";
-  handle: FileSystemFileHandle | FileSystemDirectoryHandle;
-  children?: FileEntry[];
+  path?: string;
+  children?: MemoryNode[];
+}
+
+function pathsToTree(paths: string[]): MemoryNode[] {
+  const byPath: Record<string, MemoryNode> = {};
+  for (const p of paths) {
+    const segments = p.split("/").filter(Boolean);
+    for (let i = 0; i < segments.length; i++) {
+      const segmentPath = segments.slice(0, i + 1).join("/");
+      if (byPath[segmentPath]) continue;
+      byPath[segmentPath] = {
+        name: segments[i],
+        kind: i === segments.length - 1 ? "file" : "directory",
+        ...(i === segments.length - 1 ? { path: p } : {}),
+        children: i === segments.length - 1 ? undefined : [],
+      };
+    }
+  }
+  for (const p of Object.keys(byPath)) {
+    const segments = p.split("/").filter(Boolean);
+    if (segments.length <= 1) continue;
+    const parentPath = segments.slice(0, -1).join("/");
+    const parent = byPath[parentPath];
+    const child = byPath[p];
+    if (parent?.children && child && !parent.children.some((c) => c.name === child.name))
+      parent.children!.push(child);
+  }
+  const rootPaths = Object.keys(byPath).filter((p) => p.indexOf("/") === -1);
+  const rootNodes = rootPaths.map((p) => byPath[p]).filter(Boolean);
+  rootNodes.sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === "directory" ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  return rootNodes;
 }
 
 export default function Home() {
@@ -17,13 +51,12 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [rootDir, setRootDir] = useState<FileSystemDirectoryHandle | null>(null);
-  const [fileTree, setFileTree] = useState<FileEntry[]>([]);
-  const [selectedFileContent, setSelectedFileContent] = useState<string | null>(null);
-  const [selectedFileName, setSelectedFileName] = useState<string | null>(null);
+  const [memoryTree, setMemoryTree] = useState<MemoryNode[]>([]);
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [selectedMemoryPath, setSelectedMemoryPath] = useState<string | null>(null);
+  const [selectedMemoryContent, setSelectedMemoryContent] = useState<string | null>(null);
+  const [contentLoading, setContentLoading] = useState(false);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
-  const [loadingDir, setLoadingDir] = useState(false);
-  const [loadingFile, setLoadingFile] = useState(false);
 
   const runTask = useCallback(async () => {
     setLoading(true);
@@ -49,113 +82,85 @@ export default function Home() {
     }
   }, [input, maxSteps]);
 
-  const loadDir = useCallback(async (dirHandle: FileSystemDirectoryHandle, path = ""): Promise<FileEntry[]> => {
-    const entries: FileEntry[] = [];
-    const dir = dirHandle as FileSystemDirectoryHandle & { entries(): AsyncIterableIterator<[string, FileSystemHandle]> };
-    for await (const [name, handle] of dir.entries()) {
-      entries.push({
-        name,
-        kind: handle.kind === "directory" ? "directory" : "file",
-        handle: handle as FileSystemFileHandle | FileSystemDirectoryHandle,
-      });
-    }
-    entries.sort((a, b) => {
-      if (a.kind !== b.kind) return a.kind === "directory" ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-    return entries;
-  }, []);
-
-  const pickFolder = useCallback(async () => {
-    if (!("showDirectoryPicker" in window)) {
-      setError("File system access is not supported in this browser (use Chrome/Edge).");
-      return;
-    }
-    setLoadingDir(true);
+  const loadMemoryFiles = useCallback(async () => {
+    setMemoryLoading(true);
     setError(null);
+    setSelectedMemoryPath(null);
+    setSelectedMemoryContent(null);
     try {
-      const handle = await (window as unknown as { showDirectoryPicker: () => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker();
-      setRootDir(handle);
-      const tree = await loadDir(handle);
-      setFileTree(tree);
-      setExpandedDirs(new Set([handle.name]));
-      setSelectedFileContent(null);
-      setSelectedFileName(null);
-    } catch (e) {
-      if ((e as Error).name !== "AbortError") {
-        setError(e instanceof Error ? e.message : "Failed to open folder");
+      const res = await fetch(`${MEMORY_API_BASE}/files`);
+      const text = await res.text();
+      let paths: string[] = [];
+      if (text.startsWith("data:")) {
+        const line = text.split("\n").find((l) => l.startsWith("data:"));
+        const json = line ? line.replace(/^data:\s*/, "").trim() : text;
+        paths = JSON.parse(json) as string[];
+      } else {
+        paths = JSON.parse(text) as string[];
       }
-    } finally {
-      setLoadingDir(false);
-    }
-  }, [loadDir]);
-
-  const toggleDir = useCallback(async (entry: FileEntry, path: string) => {
-    if (entry.kind !== "directory") return;
-    const key = path || entry.name;
-    const next = new Set(expandedDirs);
-    if (next.has(key)) {
-      next.delete(key);
-    } else {
-      next.add(key);
-      if (!(entry as FileEntry & { children?: FileEntry[] }).children) {
-        const children = await loadDir(entry.handle as FileSystemDirectoryHandle, key);
-        setFileTree((prev) => patchTree(prev, path, entry.name, children));
-      }
-    }
-    setExpandedDirs(next);
-  }, [expandedDirs, loadDir]);
-
-  const openFile = useCallback(async (entry: FileEntry) => {
-    if (entry.kind !== "file") return;
-    setLoadingFile(true);
-    setSelectedFileName(entry.name);
-    try {
-      const file = await (entry.handle as FileSystemFileHandle).getFile();
-      const text = await file.text();
-      setSelectedFileContent(text);
+      if (!Array.isArray(paths)) paths = [];
+      const tree = pathsToTree(paths);
+      setMemoryTree(tree);
+      if (tree.length > 0) setExpandedDirs(new Set([tree[0].name]));
     } catch (e) {
-      setSelectedFileContent(`Error reading file: ${e instanceof Error ? e.message : "Unknown"}`);
+      setError(e instanceof Error ? e.message : "Failed to load memory files");
+      setMemoryTree([]);
     } finally {
-      setLoadingFile(false);
+      setMemoryLoading(false);
     }
   }, []);
 
-  function patchTree(tree: FileEntry[], path: string, name: string, children: FileEntry[]): FileEntry[] {
-    if (!path) {
-      return tree.map((e) => (e.name === name && e.kind === "directory" ? { ...e, children } : e));
+  const openMemoryFile = useCallback(async (path: string) => {
+    setContentLoading(true);
+    setSelectedMemoryPath(path);
+    setSelectedMemoryContent(null);
+    try {
+      const res = await fetch(`${MEMORY_API_BASE}/content/${path}`);
+      const text = await res.text();
+      if (!res.ok) {
+        setSelectedMemoryContent(`Error ${res.status}: ${text}`);
+      } else {
+        setSelectedMemoryContent(text);
+      }
+    } catch (e) {
+      setSelectedMemoryContent(`Error: ${e instanceof Error ? e.message : "Unknown"}`);
+    } finally {
+      setContentLoading(false);
     }
-    const [head, ...rest] = path.split("/").filter(Boolean);
-    return tree.map((e) => {
-      if (e.name !== head || e.kind !== "directory") return e;
-      return { ...e, children: patchTree(e.children || [], rest.join("/"), name, children) };
+  }, []);
+
+  const closeMemoryFile = useCallback(() => {
+    setSelectedMemoryPath(null);
+    setSelectedMemoryContent(null);
+  }, []);
+
+  const toggleMemoryDir = useCallback((path: string) => {
+    setExpandedDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
     });
-  }
+  }, []);
 
-  async function loadChildren(entry: FileEntry, path: string): Promise<FileEntry[]> {
-    if (entry.kind !== "directory") return [];
-    return loadDir(entry.handle as FileSystemDirectoryHandle, path);
-  }
-
-  const renderTree = (entries: FileEntry[], basePath = "") =>
-    entries.map((entry) => {
-      const path = basePath ? `${basePath}/${entry.name}` : entry.name;
-      const key = path;
-      const isExpanded = expandedDirs.has(key);
-      if (entry.kind === "directory") {
+  const renderMemoryTree = (nodes: MemoryNode[], basePath = "") =>
+    nodes.map((node) => {
+      const path = basePath ? `${basePath}/${node.name}` : node.name;
+      const isExpanded = expandedDirs.has(path);
+      if (node.kind === "directory") {
         return (
-          <div key={key} className="select-none">
+          <div key={path} className="select-none">
             <button
               type="button"
-              onClick={() => toggleDir(entry, basePath)}
+              onClick={() => toggleMemoryDir(path)}
               className="flex items-center gap-1.5 rounded px-2 py-1 text-left text-sm hover:bg-white/10 w-full"
             >
               <span className="text-amber-400">{isExpanded ? "▼" : "▶"}</span>
-              <span className="text-blue-300">📁 {entry.name}</span>
+              <span className="text-blue-300">📁 {node.name}</span>
             </button>
-            {isExpanded && (
+            {isExpanded && node.children && node.children.length > 0 && (
               <div className="ml-4 border-l border-white/20 pl-1">
-                <TreeChildren entry={entry} basePath={path} loadChildren={loadChildren} loadDir={loadDir} expandedDirs={expandedDirs} setExpandedDirs={setExpandedDirs} setFileTree={setFileTree} openFile={openFile} patchTree={patchTree} />
+                {renderMemoryTree(node.children, path)}
               </div>
             )}
           </div>
@@ -163,13 +168,13 @@ export default function Home() {
       }
       return (
         <button
-          key={key}
+          key={path}
           type="button"
-          onClick={() => openFile(entry)}
+          onClick={() => node.path && openMemoryFile(node.path)}
           className="flex items-center gap-1.5 rounded px-2 py-1 text-left text-sm hover:bg-white/10 w-full"
         >
           <span className="w-3" />
-          <span className="text-emerald-300">📄 {entry.name}</span>
+          <span className="text-emerald-300">📄 {node.name}</span>
         </button>
       );
     });
@@ -228,39 +233,45 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Right panel: File system */}
+      {/* Right panel: File inspector */}
       <div className="flex w-1/2 flex-col overflow-hidden">
         <div className="border-b border-slate-700 bg-slate-800/50 px-4 py-3 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-white">File system</h2>
+          <h2 className="text-lg font-semibold text-white">File inspector</h2>
           <button
             type="button"
-            onClick={pickFolder}
-            disabled={loadingDir}
+            onClick={loadMemoryFiles}
+            disabled={memoryLoading}
             className="rounded-lg bg-slate-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-600 disabled:opacity-60"
           >
-            {loadingDir ? "Opening…" : "Open folder"}
+            {memoryLoading ? "Loading…" : "Load memory files"}
           </button>
         </div>
         <div className="flex flex-1 min-h-0">
           <div className="w-64 shrink-0 overflow-auto border-r border-slate-700 bg-slate-800/30 p-2">
-            {!rootDir ? (
-              <p className="text-sm text-slate-500 p-2">Click &quot;Open folder&quot; to browse files.</p>
+            {memoryTree.length === 0 && !memoryLoading ? (
+              <p className="text-sm text-slate-500 p-2">Load memory files to see the list.</p>
             ) : (
-              renderTree(fileTree)
+              renderMemoryTree(memoryTree)
             )}
           </div>
           <div className="flex-1 flex flex-col min-w-0 bg-slate-900">
-            {selectedFileName && (
+            {selectedMemoryPath ? (
               <>
-                <div className="border-b border-slate-700 px-3 py-2 text-sm font-medium text-slate-400 truncate">
-                  {selectedFileName}
+                <div className="border-b border-slate-700 px-3 py-2 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={closeMemoryFile}
+                    className="rounded px-2 py-1 text-sm font-medium text-slate-300 hover:bg-white/10"
+                  >
+                    Back
+                  </button>
+                  <span className="text-sm font-medium text-slate-400 truncate">{selectedMemoryPath}</span>
                 </div>
                 <pre className="flex-1 overflow-auto p-3 text-xs text-slate-300 whitespace-pre-wrap break-words">
-                  {loadingFile ? "Loading…" : selectedFileContent ?? ""}
+                  {contentLoading ? "Loading…" : selectedMemoryContent ?? ""}
                 </pre>
               </>
-            )}
-            {!selectedFileName && (
+            ) : (
               <div className="flex flex-1 items-center justify-center text-slate-500 text-sm">
                 Select a file to view its contents
               </div>
@@ -269,102 +280,5 @@ export default function Home() {
         </div>
       </div>
     </div>
-  );
-}
-
-function TreeChildren({
-  entry,
-  basePath,
-  loadChildren,
-  loadDir,
-  expandedDirs,
-  setExpandedDirs,
-  setFileTree,
-  openFile,
-  patchTree,
-}: {
-  entry: FileEntry;
-  basePath: string;
-  loadChildren: (entry: FileEntry, path: string) => Promise<FileEntry[]>;
-  loadDir: (dir: FileSystemDirectoryHandle, path: string) => Promise<FileEntry[]>;
-  expandedDirs: Set<string>;
-  setExpandedDirs: React.Dispatch<React.SetStateAction<Set<string>>>;
-  setFileTree: React.Dispatch<React.SetStateAction<FileEntry[]>>;
-  openFile: (entry: FileEntry) => void;
-  patchTree: (tree: FileEntry[], path: string, name: string, children: FileEntry[]) => FileEntry[];
-}) {
-  const [children, setChildren] = useState<FileEntry[]>(entry.children ?? []);
-  const [loaded, setLoaded] = useState(Boolean(entry.children?.length));
-
-  useEffect(() => {
-    if (entry.children?.length) {
-      setChildren(entry.children);
-      setLoaded(true);
-    }
-  }, [entry.children]);
-
-  useEffect(() => {
-    if (entry.kind !== "directory" || loaded) return;
-    loadDir(entry.handle as FileSystemDirectoryHandle, basePath).then((c) => {
-      setChildren(c);
-      setLoaded(true);
-      setFileTree((prev) => patchTree(prev, basePath.split("/").slice(0, -1).join("/"), entry.name, c));
-    });
-  }, [entry, basePath, loaded, loadDir, setFileTree, patchTree]);
-
-  return (
-    <>
-      {children.map((e) => {
-        const path = `${basePath}/${e.name}`;
-        const isExpanded = expandedDirs.has(path);
-        if (e.kind === "directory") {
-          return (
-            <div key={path} className="select-none">
-              <button
-                type="button"
-                onClick={() => {
-                  setExpandedDirs((s) => {
-                    const next = new Set(s);
-                    if (next.has(path)) next.delete(path);
-                    else next.add(path);
-                    return next;
-                  });
-                }}
-                className="flex items-center gap-1.5 rounded px-2 py-1 text-left text-sm hover:bg-white/10 w-full"
-              >
-                <span className="text-amber-400">{isExpanded ? "▼" : "▶"}</span>
-                <span className="text-blue-300">📁 {e.name}</span>
-              </button>
-              {isExpanded && (
-                <div className="ml-4 border-l border-white/20 pl-1">
-                  <TreeChildren
-                    entry={e}
-                    basePath={path}
-                    loadChildren={loadChildren}
-                    loadDir={loadDir}
-                    expandedDirs={expandedDirs}
-                    setExpandedDirs={setExpandedDirs}
-                    setFileTree={setFileTree}
-                    openFile={openFile}
-                    patchTree={patchTree}
-                  />
-                </div>
-              )}
-            </div>
-          );
-        }
-        return (
-          <button
-            key={path}
-            type="button"
-            onClick={() => openFile(e)}
-            className="flex items-center gap-1.5 rounded px-2 py-1 text-left text-sm hover:bg-white/10 w-full"
-          >
-            <span className="w-3" />
-            <span className="text-emerald-300">📄 {e.name}</span>
-          </button>
-        );
-      })}
-    </>
   );
 }

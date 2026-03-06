@@ -12,6 +12,19 @@ interface MemoryNode {
   children?: MemoryNode[];
 }
 
+interface TraceStep {
+  step: number;
+  agent: string;
+  output: string;
+  done: boolean;
+}
+
+interface TaskResult {
+  task_id: string;
+  output: string;
+  trace: TraceStep[];
+}
+
 function pathsToTree(paths: string[]): MemoryNode[] {
   const byPath: Record<string, MemoryNode> = {};
   for (const p of paths) {
@@ -49,7 +62,8 @@ export default function Home() {
   const [input, setInput] = useState("What can you tell about Cristiano Ronaldo 10 child");
   const [maxSteps, setMaxSteps] = useState(4);
   const [loading, setLoading] = useState(false);
-  const [response, setResponse] = useState<string | null>(null);
+  const [taskResult, setTaskResult] = useState<TaskResult | null>(null);
+  const [rawResponse, setRawResponse] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [memoryTree, setMemoryTree] = useState<MemoryNode[]>([]);
   const [memoryLoading, setMemoryLoading] = useState(false);
@@ -57,11 +71,13 @@ export default function Home() {
   const [selectedMemoryContent, setSelectedMemoryContent] = useState<string | null>(null);
   const [contentLoading, setContentLoading] = useState(false);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+  const [showRawJson, setShowRawJson] = useState(false);
 
   const runTask = useCallback(async () => {
     setLoading(true);
     setError(null);
-    setResponse(null);
+    setTaskResult(null);
+    setRawResponse(null);
     try {
       const res = await fetch(API_URL, {
         method: "POST",
@@ -69,11 +85,21 @@ export default function Home() {
         body: JSON.stringify({ input, max_steps: maxSteps }),
       });
       const data = await res.json().catch(() => ({}));
+      const raw = JSON.stringify(data, null, 2);
       if (!res.ok) {
-        setError(`HTTP ${res.status}: ${JSON.stringify(data, null, 2)}`);
-        setResponse(JSON.stringify(data, null, 2));
+        setError(`HTTP ${res.status}: ${raw}`);
+        setRawResponse(raw);
       } else {
-        setResponse(JSON.stringify(data, null, 2));
+        const hasTaskResult =
+          data &&
+          typeof data.task_id === "string" &&
+          typeof data.output === "string" &&
+          Array.isArray(data.trace);
+        if (hasTaskResult) {
+          setTaskResult(data as TaskResult);
+        } else {
+          setRawResponse(raw);
+        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Request failed");
@@ -262,10 +288,83 @@ export default function Home() {
           </button>
           {error && <p className="text-sm text-red-400">{error}</p>}
           <div className="flex-1 min-h-0 flex flex-col rounded-lg border border-slate-700 bg-slate-800/50">
-            <div className="border-b border-slate-700 px-3 py-2 text-sm font-medium text-slate-400">Response</div>
-            <pre className="flex-1 overflow-auto p-3 text-xs text-slate-300 whitespace-pre-wrap break-words">
-              {response ?? (loading ? "…" : "Run a task to see the JSON response here.")}
-            </pre>
+            <div className="border-b border-slate-700 px-3 py-2 text-sm font-medium text-slate-400 flex items-center justify-between">
+              Response
+              {taskResult && (
+                <button
+                  type="button"
+                  onClick={() => setShowRawJson((v) => !v)}
+                  className="text-xs font-normal text-amber-400 hover:text-amber-300"
+                >
+                  {showRawJson ? "Hide" : "Show"} raw JSON
+                </button>
+              )}
+            </div>
+            <div className="flex-1 overflow-auto p-3 min-h-0">
+              {loading && (
+                <p className="text-sm text-slate-400">…</p>
+              )}
+              {!loading && taskResult && (
+                <div className="flex flex-col gap-4">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs text-slate-500">Task ID:</span>
+                    <code className="text-xs text-slate-400 bg-slate-800 px-2 py-0.5 rounded">
+                      {taskResult.task_id}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard.writeText(taskResult.task_id)}
+                      className="text-xs text-amber-400 hover:text-amber-300"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <div className="rounded-lg border border-slate-600 bg-slate-800/80 p-3">
+                    <div className="text-xs font-medium text-slate-400 mb-1">Output</div>
+                    <pre className="text-sm text-slate-200 whitespace-pre-wrap break-words">
+                      {taskResult.output}
+                    </pre>
+                  </div>
+                  <div>
+                    <div className="text-xs font-medium text-slate-400 mb-2">Trace</div>
+                    <div className="space-y-3 border-l-2 border-slate-600 pl-4">
+                      {taskResult.trace.map((s) => (
+                        <div key={s.step} className="relative">
+                          <div className="flex items-center gap-2 flex-wrap mb-1">
+                            <span className="text-xs font-medium text-amber-400">Step {s.step}</span>
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-300">
+                              {s.agent}
+                            </span>
+                            {s.done && (
+                              <span className="text-xs text-emerald-400">Final</span>
+                            )}
+                          </div>
+                          <pre className="text-xs text-slate-300 whitespace-pre-wrap break-words bg-slate-800/50 rounded p-2">
+                            {s.output}
+                          </pre>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  {showRawJson && (
+                    <details open className="mt-2">
+                      <summary className="text-xs text-slate-500 cursor-pointer mb-1">Raw JSON</summary>
+                      <pre className="p-2 text-xs text-slate-400 whitespace-pre-wrap break-words rounded bg-slate-900 border border-slate-700">
+                        {JSON.stringify(taskResult, null, 2)}
+                      </pre>
+                    </details>
+                  )}
+                </div>
+              )}
+              {!loading && !taskResult && rawResponse !== null && (
+                <pre className="text-xs text-slate-300 whitespace-pre-wrap break-words">
+                  {rawResponse}
+                </pre>
+              )}
+              {!loading && !taskResult && rawResponse === null && (
+                <p className="text-sm text-slate-500">Run a task to see the response here.</p>
+              )}
+            </div>
           </div>
         </div>
       </div>

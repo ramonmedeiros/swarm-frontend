@@ -190,9 +190,9 @@ export default function Home() {
             <button
               type="button"
               onClick={() => toggleMemoryDir(path)}
-              className="flex items-center gap-1.5 rounded px-2 py-1 text-left text-sm hover:bg-white/10 w-full"
+              className="flex items-center gap-1.5 rounded px-2 py-1 text-left text-sm hover:bg-white/10 w-full whitespace-nowrap"
             >
-              <span className="text-amber-400">{isExpanded ? "▼" : "▶"}</span>
+              <span className="text-amber-400 shrink-0">{isExpanded ? "▼" : "▶"}</span>
               <span className="text-blue-300">📁 {node.name}</span>
             </button>
             {isExpanded && node.children && node.children.length > 0 && (
@@ -208,9 +208,9 @@ export default function Home() {
           key={path}
           type="button"
           onClick={() => node.path && openMemoryFile(node.path)}
-          className="flex items-center gap-1.5 rounded px-2 py-1 text-left text-sm hover:bg-white/10 w-full"
+          className="flex items-center gap-1.5 rounded px-2 py-1 text-left text-sm hover:bg-white/10 w-full whitespace-nowrap"
         >
-          <span className="w-3" />
+          <span className="w-3 shrink-0" />
           <span className="text-emerald-300">📄 {node.name}</span>
         </button>
       );
@@ -276,14 +276,16 @@ export default function Home() {
           <h2 className="text-lg font-semibold text-white">File inspector</h2>
         </div>
         <div className="flex flex-1 min-h-0">
-          <div className="w-64 shrink-0 overflow-auto border-r border-slate-700 bg-slate-800/30 p-2">
-            {memoryLoading && memoryTree.length === 0 ? (
-              <p className="text-sm text-slate-500 p-2">Loading…</p>
-            ) : memoryTree.length === 0 ? (
-              <p className="text-sm text-slate-500 p-2">No memory files</p>
-            ) : (
-              renderMemoryTree(memoryTree)
-            )}
+          <div className="w-64 shrink-0 overflow-auto border-r border-slate-700 bg-slate-800/30">
+            <div className="inline-block min-w-full p-2">
+              {memoryLoading && memoryTree.length === 0 ? (
+                <p className="text-sm text-slate-500 p-2">Loading…</p>
+              ) : memoryTree.length === 0 ? (
+                <p className="text-sm text-slate-500 p-2">No memory files</p>
+              ) : (
+                renderMemoryTree(memoryTree)
+              )}
+            </div>
           </div>
           <div className="flex-1 flex flex-col min-w-0 bg-slate-900">
             {selectedMemoryPath ? (

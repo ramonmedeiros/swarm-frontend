@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 
 const API_URL = "https://swarm-git-56261926654.europe-west1.run.app/v1/tasks";
 const MEMORY_API_BASE = "https://swarm-git-56261926654.europe-west1.run.app/v1/memory";
@@ -87,21 +87,54 @@ export default function Home() {
     setError(null);
     setSelectedMemoryPath(null);
     setSelectedMemoryContent(null);
+    setMemoryTree([]);
+    const accumulatedPaths = new Set<string>();
     try {
       const res = await fetch(`${MEMORY_API_BASE}/files`);
-      const text = await res.text();
-      let paths: string[] = [];
-      if (text.startsWith("data:")) {
-        const line = text.split("\n").find((l) => l.startsWith("data:"));
-        const json = line ? line.replace(/^data:\s*/, "").trim() : text;
-        paths = JSON.parse(json) as string[];
-      } else {
-        paths = JSON.parse(text) as string[];
+      if (!res.body) {
+        throw new Error("Response has no body");
       }
-      if (!Array.isArray(paths)) paths = [];
-      const tree = pathsToTree(paths);
-      setMemoryTree(tree);
-      if (tree.length > 0) setExpandedDirs(new Set([tree[0].name]));
+      const decoder = new TextDecoderStream();
+      const streamReader = res.body.pipeThrough(decoder).getReader();
+      let buffer = "";
+      const processLines = (chunk: string) => {
+        buffer += chunk;
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          let json: string;
+          if (trimmed.startsWith("data:")) {
+            json = trimmed.replace(/^data:\s*/, "").trim();
+          } else {
+            json = trimmed;
+          }
+          if (!json) continue;
+          try {
+            const parsed = JSON.parse(json) as unknown;
+            const newPaths = Array.isArray(parsed) ? (parsed as string[]) : [parsed as string];
+            if (newPaths.length > 0) {
+              newPaths.forEach((p) => typeof p === "string" && accumulatedPaths.add(p));
+              const tree = pathsToTree(Array.from(accumulatedPaths));
+              setMemoryTree(tree);
+            }
+          } catch {
+            // skip malformed JSON lines
+          }
+        }
+      };
+      while (true) {
+        const { done, value } = await streamReader.read();
+        if (done) break;
+        processLines(value ?? "");
+      }
+      if (buffer.trim()) processLines("\n");
+      if (accumulatedPaths.size > 0) {
+        const tree = pathsToTree(Array.from(accumulatedPaths));
+        setMemoryTree(tree);
+        if (tree.length > 0) setExpandedDirs((prev) => new Set([...prev, tree[0].name]));
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load memory files");
       setMemoryTree([]);
@@ -109,6 +142,10 @@ export default function Home() {
       setMemoryLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    loadMemoryFiles();
+  }, [loadMemoryFiles]);
 
   const openMemoryFile = useCallback(async (path: string) => {
     setContentLoading(true);
@@ -235,21 +272,15 @@ export default function Home() {
 
       {/* Right panel: File inspector */}
       <div className="flex w-1/2 flex-col overflow-hidden">
-        <div className="border-b border-slate-700 bg-slate-800/50 px-4 py-3 flex items-center justify-between">
+        <div className="border-b border-slate-700 bg-slate-800/50 px-4 py-3">
           <h2 className="text-lg font-semibold text-white">File inspector</h2>
-          <button
-            type="button"
-            onClick={loadMemoryFiles}
-            disabled={memoryLoading}
-            className="rounded-lg bg-slate-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-600 disabled:opacity-60"
-          >
-            {memoryLoading ? "Loading…" : "Load memory files"}
-          </button>
         </div>
         <div className="flex flex-1 min-h-0">
           <div className="w-64 shrink-0 overflow-auto border-r border-slate-700 bg-slate-800/30 p-2">
-            {memoryTree.length === 0 && !memoryLoading ? (
-              <p className="text-sm text-slate-500 p-2">Load memory files to see the list.</p>
+            {memoryLoading && memoryTree.length === 0 ? (
+              <p className="text-sm text-slate-500 p-2">Loading…</p>
+            ) : memoryTree.length === 0 ? (
+              <p className="text-sm text-slate-500 p-2">No memory files</p>
             ) : (
               renderMemoryTree(memoryTree)
             )}
